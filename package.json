@@ -1,6 +1,6 @@
 {
   "name": "@kdoq/kdoq",
-  "version": "0.0.0",
+  "version": "0.0.1-rc.1",
   "description": "JavaScript client for the kdoq document database (native protocol over WebTransport)",
   "license": "MIT",
   "type": "module",
