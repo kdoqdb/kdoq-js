@@ -122,6 +122,7 @@ export function parseStatistics(g: Fields): Statistics {
     documents: { processed: n(d, 1), selected: n(d, 2), rejected: n(d, 3), filterErrors: n(d, 4) },
     budgetUsed: { steps: n(b, 1), valueBytes: n(b, 2), activeNs: n(b, 3) },
     memory: { currentBytes: n(m, 1), peakBytes: n(m, 2) },
+    ...(g.has(6) ? { durationUs: g.u64(6) } : {}),
     ...(r ? { reduction: { accumulatedDocuments: n(r, 1), groupsCreated: n(r, 2) } } : {}),
   };
 }

@@ -257,6 +257,12 @@ const page = await query.toArray();
 console.log((await query.statistics)?.documents.selected);
 ```
 
+When statistics are requested, `page.statistics?.durationUs` on a manual cursor page
+reports the server handling time of that page in microseconds. This measurement is
+independent of budget accounting; `budgetUsed.activeNs` remains the cumulative
+active execution time and requires server budgeting. Older servers may omit
+`durationUs`. Automatic query statistics also expose this field when it is reported.
+
 ### Aggregation
 
 A pipeline that changes the shape of the result goes in the second argument; the type parameter

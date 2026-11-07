@@ -120,7 +120,7 @@ export interface Statistics {
   budgetUsed: { steps: N; valueBytes: N; activeNs: N };
   /** Not reported over REST. */
   memory?: { currentBytes: N; peakBytes: N };
-  /** Server handling time of the last page, in microseconds; reported over REST only. */
+  /** Server handling time of the last page, in microseconds; independent of budget accounting. */
   durationUs?: N;
   reduction?: { accumulatedDocuments: N; groupsCreated: N };
 }
