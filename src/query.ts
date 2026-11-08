@@ -3,12 +3,24 @@ import type { OperationStream, OpSpec } from "./internal/operation.js";
 import { GroupKey, KeyBytes, type Value } from "./internal/codec.js";
 import { enc, type Fields } from "./internal/wire.js";
 import type { Runner } from "./internal/runner.js";
-import type { Budget, Cursor as CursorApi, FindOptions, Item, PipelineStage, Query, QueryOptions, Statistics, N } from "./types.js";
+import type {
+  Budget,
+  Cursor as CursorApi,
+  Explain,
+  FindOptions,
+  Item,
+  PipelineStage,
+  Query,
+  QueryOptions,
+  Statistics,
+  N,
+} from "./types.js";
 
 export type {
   Budget,
   CountOptions,
   Diagnostic,
+  Explain,
   FindOptions,
   Item,
   PipelineStage,
@@ -85,10 +97,16 @@ export function createSpec(
         observeGroup(o),
         ...budgetGroup(o.budget),
         ...(o.pruning === undefined ? [] : [enc.bool(5, o.pruning)]),
+        ...(o.explain === undefined ? [] : [enc.u8(6, EXPLAIN_CODES[o.explain] ?? invalidExplain(o.explain))]),
       ),
     ]),
   };
 }
+
+const EXPLAIN_CODES: Record<Explain, number> = { off: 0, plan: 1, analyze: 2 };
+const invalidExplain = (v: unknown): never => {
+  throw new TypeError(`explain must be off, plan or analyze, got ${String(v)}`);
+};
 
 export const readSpec = (cursorId: number | bigint, size: number | undefined): OpSpec => ({
   operation: 0x0503,

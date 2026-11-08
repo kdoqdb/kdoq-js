@@ -257,6 +257,15 @@ const page = await query.toArray();
 console.log((await query.statistics)?.documents.selected);
 ```
 
+`find` also takes `explain: "plan" | "analyze"` (default `"off"`). An enabled mode yields exactly
+one item, the explanation report, instead of the documents; it works only with no pipeline or a
+single count stage, and not with `count`. `"plan"` shows the prepared plan without filtering
+documents, `"analyze"` also observes one real execution.
+
+```ts
+const [report] = await accounts.find("age >= 30", undefined, { explain: "plan" }).toArray();
+```
+
 When statistics are requested, `page.statistics?.durationUs` on a manual cursor page
 reports the server handling time of that page in microseconds. This measurement is
 independent of budget accounting; `budgetUsed.activeNs` remains the cumulative

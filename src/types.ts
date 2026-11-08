@@ -101,7 +101,16 @@ export interface QueryOptions {
   onDiagnostic?(d: Diagnostic): void;
 }
 
+/**
+ * `off` runs the query normally. `plan` returns the prepared plan without filtering documents;
+ * `analyze` runs the query once and returns the plan with execution observations. An enabled mode
+ * yields exactly one report document instead of the result items.
+ */
+export type Explain = "off" | "plan" | "analyze";
+
 export interface FindOptions extends QueryOptions {
+  /** Fixed when the query is created; omitted means `off`. Not accepted by `count`. */
+  explain?: Explain;
   pageSize?: number;
   idleTtl?: number;
   window?: { skip?: number; limit?: number };

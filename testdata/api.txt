@@ -40,6 +40,7 @@ package @kdoq/kdoq
   type ClientState
   type CountOptions
   type ErrorCode
+  type Explain
   type Key
   type MutationOptions
   type Outcome

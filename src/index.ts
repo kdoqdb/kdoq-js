@@ -38,6 +38,7 @@ export type {
   Budget,
   CountOptions,
   Diagnostic,
+  Explain,
   FindOptions,
   Item,
   PipelineStage,

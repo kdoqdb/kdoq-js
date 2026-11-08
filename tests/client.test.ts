@@ -229,6 +229,27 @@ describe("queries", () => {
     await client.close();
   });
 
+  test("explain is sent as a u8 on create only, and unknown values are rejected", async () => {
+    const server = new FakeServer();
+    server.handler = (cmd) => page(9, [], cmd.operation === 0x0501 ? 9 : 0);
+    const client = await open(server);
+    const coll = client.db().collection("docs");
+    for (const [explain, code] of [
+      [undefined, undefined],
+      ["off", 0],
+      ["plan", 1],
+      ["analyze", 2],
+    ] as const) {
+      const start = server.commands.length;
+      await coll.find(undefined, undefined, { explain }).toArray();
+      const [create, read] = server.commands.slice(start);
+      expect(create.payload.group(5)!.u8(6)).toBe(code);
+      expect(read?.payload.group(2)?.has(6) ?? false).toBe(false);
+    }
+    await expect(coll.find(undefined, undefined, { explain: "full" as never }).toArray()).rejects.toThrow(TypeError);
+    await client.close();
+  });
+
   test("auto-pagination reads every page with CURSOR_READ", async () => {
     const server = new FakeServer();
     server.handler = (cmd) => {
