@@ -13,6 +13,7 @@ import type {
   Query,
   QueryOptions,
   Statistics,
+  UnwindStep,
   N,
 } from "./types.js";
 
@@ -28,6 +29,7 @@ export type {
   Query,
   QueryOptions,
   Statistics,
+  UnwindStep,
 } from "./types.js";
 
 export const DEFAULT_PAGE_SIZE = 1000;
@@ -41,6 +43,43 @@ const stageFields = (s: PipelineStage): Uint8Array => {
 
 export const encodePipeline = (stages: PipelineStage[] | undefined): Uint8Array[] =>
   stages?.length ? [enc.group(4, ...stages.map(stageFields))] : [];
+
+/** The most unwind steps one query or count takes. */
+export const MAX_UNWIND_STEPS = 8;
+
+const UNWIND_MODES = { all: 0, any: 1 } as const;
+const UNWIND_EMITS = { element: 0, source: 1 } as const;
+const UNWIND_NON_ARRAY = { skip: 0, error: 1, single: 2 } as const;
+
+/**
+ * The `unwind` group (field 6 of the create and count commands), or nothing for no steps. A property
+ * that is left out is not sent, so the server applies its defaults; the server also decides which
+ * combinations are valid.
+ */
+export function encodeUnwind(steps: readonly UnwindStep[] | undefined): Uint8Array[] {
+  if (!steps?.length) return [];
+  if (steps.length > MAX_UNWIND_STEPS) throw new TypeError(`a query takes at most ${MAX_UNWIND_STEPS} unwind steps, got ${steps.length}`);
+  const code = (id: number, name: string, codes: Record<string, number>, v: string | undefined) => {
+    if (v === undefined) return [];
+    if (!Object.hasOwn(codes, v)) throw new TypeError(`unwind ${name} must be ${Object.keys(codes).join(", ")}, got ${String(v)}`);
+    return [enc.u8(id, codes[v])];
+  };
+  return [
+    enc.group(
+      6,
+      ...steps.map((s, i) => {
+        if (typeof s?.path !== "string" || s.path === "") throw new TypeError(`unwind step ${i + 1} needs a non-empty path`);
+        return enc.group(
+          1,
+          enc.str(1, s.path),
+          ...code(2, "mode", UNWIND_MODES, s.mode),
+          ...code(3, "emit", UNWIND_EMITS, s.emit),
+          ...code(4, "nonArray", UNWIND_NON_ARRAY, s.nonArray),
+        );
+      }),
+    ),
+  ];
+}
 
 const optional = (fields: Array<Uint8Array | undefined>): Uint8Array[] => fields.filter((f): f is Uint8Array => f !== undefined);
 const u64 = (id: number, v: number | undefined) => (v === undefined ? undefined : enc.u64(id, v));
@@ -99,6 +138,7 @@ export function createSpec(
         ...(o.pruning === undefined ? [] : [enc.bool(5, o.pruning)]),
         ...(o.explain === undefined ? [] : [enc.u8(6, EXPLAIN_CODES[o.explain] ?? invalidExplain(o.explain))]),
       ),
+      ...encodeUnwind(o.unwind).flatMap((f) => [...f]),
     ]),
   };
 }

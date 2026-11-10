@@ -45,6 +45,7 @@ export type {
   Progress,
   Query,
   Statistics,
+  UnwindStep,
 } from "./query.js";
 export type { OpOptions } from "./types.js";
 export type { TransportFactory, TransportLike } from "./internal/connection.js";

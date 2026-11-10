@@ -71,6 +71,21 @@ export type PipelineStage =
   | { reduce: { key: string; initial: string; accumulate: string } }
   | { count: true };
 
+/**
+ * One unwind step: it turns the elements of the array at `path` into documents before the query filter
+ * runs. A query takes at most 8 steps, nested in the order given.
+ */
+export interface UnwindStep {
+  /** Dotted path to the array; required. */
+  path: string;
+  /** `all` returns every satisfying element, `any` only the first one per document. Defaults to `all`, or `any` with `emit: "source"`. */
+  mode?: "any" | "all";
+  /** `element` replaces the array by one element; `source` keeps the array and returns the document once. Defaults to `element`. */
+  emit?: "element" | "source";
+  /** What a missing, `null` or non-array value does: `skip` produces no row, `error` also reports a diagnostic, `single` treats it as a one-element array. Defaults to `skip`. */
+  nonArray?: "skip" | "error" | "single";
+}
+
 export interface Budget {
   memoryBytes?: number;
   admissionWaitMs?: number;
@@ -91,6 +106,8 @@ export interface Progress {
 }
 
 export interface QueryOptions {
+  /** Unwind steps that run before the filter; `find` yields one item per row and `count` counts rows. Omitted or empty means none. */
+  unwind?: readonly UnwindStep[];
   /** Bloom necessary-condition pruning; omitted means enabled. Fixed for the execution. */
   pruning?: boolean;
   signal?: AbortSignal;
@@ -244,12 +261,12 @@ export interface Collection<T extends Doc = Doc> {
   bulk(statements: BulkStatement[], op?: MutationOptions & { ordered?: boolean }): Promise<BulkResult>;
   /**
    * Starts a query: a lazy async iterable of `{ key, value }`. Pages are read as you iterate, and leaving the loop
-   * closes the server cursor. A `pipeline` can change the shape of the results, which `R` then names.
+   * closes the server cursor. A `pipeline` or `unwind` steps can change the shape of the results, which `R` then names.
    * With `paginate: "manual"` it resolves to a `Cursor` you read page by page.
    */
   find<R = T>(filter?: string, pipeline?: PipelineStage[], options?: FindOptions & { paginate?: true | false }): Query<R>;
   find(filter: string | undefined, pipeline: PipelineStage[] | undefined, options: FindOptions & { paginate: "manual" }): Promise<Cursor>;
-  /** Counts the documents matching a filter (all of them without one). */
+  /** Counts the documents matching a filter (all of them without one); with `unwind` steps it counts rows. */
   count(filter?: string, options?: CountOptions): Promise<number | bigint>;
   readonly info: Promise<CollectionInfo>;
   create(): Promise<void>;

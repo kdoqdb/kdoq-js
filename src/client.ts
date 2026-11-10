@@ -31,7 +31,7 @@ import type {
   Stage,
   Target,
 } from "./types.js";
-import { Cursor, createSpec, QueryImpl, parseStatistics, type PaginateMode } from "./query.js";
+import { Cursor, createSpec, encodeUnwind, QueryImpl, parseStatistics, type PaginateMode } from "./query.js";
 import { RUNNER, type Runner, type Unary } from "./internal/runner.js";
 import { KeyBytes, NameDictionary, type Doc } from "./internal/codec.js";
 import { concat, enc, type Fields, utf8 } from "./internal/wire.js";
@@ -516,6 +516,7 @@ class CollectionImpl implements Collection {
       this.ns,
       ...(filter === undefined ? [] : [enc.str(3, filter)]),
       enc.group(4, observe, ...(o.pruning === undefined ? [] : [enc.bool(5, o.pruning)])),
+      ...encodeUnwind(o.unwind),
     );
     const r = await this.runner.unary({ operation: 0x0502, payload }, o);
     return r.items[0].need(r.items[0].u64(1), 1);

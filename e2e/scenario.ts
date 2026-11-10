@@ -122,6 +122,91 @@ async function scenario(c: Config, transport?: TransportFactory) {
   await stats.toArray();
   check((await stats.statistics)?.documents.selected === 1, "statistics");
 
+  // Unwind steps: one flat filter about one element of each array, rows that keep the document key.
+  await db.collections.create("Orders");
+  const orders = db.collection("Orders");
+  const tag = (color: string, size: string) => ({ color, size });
+  await orders.put("o1", {
+    items: [
+      { sku: "pen", qty: 150 },
+      { sku: "ink", qty: 50 },
+    ],
+    tags: [tag("red", "s"), tag("blue", "m")],
+  });
+  await orders.put("o2", { items: [{ sku: "pen", qty: 50 }], tags: [tag("red", "s")] });
+  await orders.put("o3", {
+    items: [
+      { sku: "pen", qty: 200 },
+      { sku: "pen", qty: 300 },
+    ],
+    tags: [tag("red", "m"), tag("red", "s")],
+  });
+  await orders.put("o4", { items: "pen", tags: [] });
+  const flat = "items.sku == 'pen' and items.qty > 100 and tags.color == 'red'";
+  type Unwound = { items: { sku: string; qty: number }; tags: { color: string; size: string } };
+  const matched = await orders
+    .find<Unwound>(flat, [{ project: "{items: items, tags: tags}" }], {
+      unwind: [
+        { path: "items", mode: "any" },
+        { path: "tags", mode: "any" },
+      ],
+    })
+    .toArray();
+  eq(
+    matched.map((i) => [(i.key as KeyBytes).text(), i.value.items.qty, i.value.tags.size]),
+    [
+      ["o1", 150, "s"],
+      ["o3", 200, "m"],
+    ],
+    "unwind with mode any returns the first matched element of each array",
+  );
+  const unwound = [{ path: "items" }, { path: "tags" }];
+  const rows = await orders.find<Unwound>(flat, undefined, { unwind: unwound }).toArray();
+  eq(
+    rows.map((i) => [(i.key as KeyBytes).text(), i.value.items.qty, i.value.tags.size]),
+    [
+      ["o1", 150, "s"],
+      ["o3", 200, "m"],
+      ["o3", 200, "s"],
+      ["o3", 300, "m"],
+      ["o3", 300, "s"],
+    ],
+    "unwind with the default mode all returns every combination, keyed by its document",
+  );
+  eq(await orders.count(flat, { unwind: unwound }), 5, "count counts the rows of all steps");
+  eq(
+    await orders.count(flat, {
+      unwind: [
+        { path: "items", mode: "any" },
+        { path: "tags", mode: "any" },
+      ],
+    }),
+    2,
+    "count with mode any",
+  );
+  const source = await orders.find("items.sku == 'pen'", undefined, { unwind: [{ path: "items", emit: "source" }] }).toArray();
+  eq(
+    source.map((i) => [(i.key as KeyBytes).text(), (i.value.items as unknown[]).length]),
+    [
+      ["o1", 2],
+      ["o2", 1],
+      ["o3", 2],
+    ],
+    "emit source returns each document once with its array",
+  );
+  eq(
+    await orders.count("items == 'pen'", { unwind: [{ path: "items", nonArray: "single" }] }),
+    1,
+    "nonArray single treats a value that is not an array as one element",
+  );
+  const refused = await orders.count(undefined, { unwind: [{ path: "items", mode: "all", emit: "source" }] }).catch((e) => e);
+  check(refused instanceof KdoqError && refused.code === ErrorCode.InvalidDocument, "mode all with emit source is rejected by the server");
+  const [report] = await orders.find(flat, undefined, { explain: "plan", unwind: unwound }).toArray();
+  check(
+    JSON.stringify(report.value, (_, v) => (typeof v === "bigint" ? `${v}n` : v)).includes('"unwind"'),
+    "explain plan lists the unwind steps",
+  );
+
   const sessions = await client.sessions.list();
   check(
     sessions.some((s) => s.id === client.session!.id),

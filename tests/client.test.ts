@@ -250,6 +250,137 @@ describe("queries", () => {
     await client.close();
   });
 
+  describe("unwind steps", () => {
+    const twoSteps = [
+      { path: "items", mode: "any" },
+      { path: "tags", mode: "any" },
+    ] as const;
+    const countServer = () => {
+      const server = new FakeServer();
+      server.handler = (cmd) =>
+        cmd.operation === 0x0502 ? [encodeFrame(Kind.BEGIN), frame(Kind.ITEM, enc.u64(1, 7)), encodeFrame(Kind.END)] : page(9, [], 0);
+      return server;
+    };
+    /** The steps of the `unwind` group as the fake server decodes them: path and the three optional bytes. */
+    const steps = (cmd: { payload: import("../src/internal/wire").Fields }) =>
+      cmd.payload
+        .group(6)!
+        .groups(1)
+        .map((s) => [s.str(1), s.u8(2), s.u8(3), s.u8(4)]);
+
+    test("find and count send an ordered group in field 6 with explicit values", async () => {
+      const server = countServer();
+      const client = await open(server);
+      const coll = client.db().collection("docs");
+      const unwind = [
+        { path: "items", mode: "any", emit: "element", nonArray: "skip" },
+        { path: "tags", mode: "all", emit: "element", nonArray: "single" },
+        { path: "tags", emit: "source", nonArray: "error" },
+      ] as const;
+      await coll.find("items.id = 1", undefined, { unwind }).toArray();
+      expect(await coll.count("items.id = 1", { unwind })).toBe(7);
+      const [create, count] = server.commands;
+      const expected = [
+        ["items", 1, 0, 0],
+        ["tags", 0, 0, 2],
+        ["tags", undefined, 1, 1],
+      ];
+      expect(steps(create)).toEqual(expected);
+      expect(steps(count)).toEqual(expected);
+      expect(create.payload.str(3)).toBe("items.id = 1");
+      await client.close();
+    });
+
+    test("an absent property is not sent, so the server applies its defaults", async () => {
+      const server = countServer();
+      const client = await open(server);
+      await client
+        .db()
+        .collection("docs")
+        .find(undefined, undefined, { unwind: [{ path: "items" }, { path: "tags", emit: "source" }] })
+        .toArray();
+      expect(steps(server.commands[0])).toEqual([
+        ["items", undefined, undefined, undefined],
+        ["tags", undefined, 1, undefined],
+      ]);
+      await client.close();
+    });
+
+    test("the group is absent without steps, so a server without the feature is not affected", async () => {
+      const server = countServer();
+      const client = await open(server);
+      const coll = client.db().collection("docs");
+      for (const unwind of [undefined, []]) {
+        const start = server.commands.length;
+        await coll.find("a", undefined, { unwind }).toArray();
+        await coll.count("a", { unwind });
+        for (const cmd of server.commands.slice(start)) expect(cmd.payload.has(6)).toBe(false);
+      }
+      await client.close();
+    });
+
+    test("aggregate and manual cursors send the group beside the pipeline, and pages do not repeat it", async () => {
+      const server = new FakeServer();
+      server.handler = (cmd) => {
+        if (cmd.operation === 0x0501) return page(9, [{ items: { id: 1 } }], 9);
+        if (cmd.operation === 0x0503) return page(9, [], 0);
+        return [encodeFrame(Kind.BEGIN), encodeFrame(Kind.END)];
+      };
+      const client = await open(server);
+      const coll = client.db().collection("docs");
+      await coll.find<number>("items.id = 1", [{ count: true }], { unwind: twoSteps }).toArray();
+      const [create, read] = server.commands;
+      expect(create.payload.group(4)!.has(3)).toBe(true);
+      expect(create.payload.group(5)).toBeDefined();
+      expect(steps(create)).toEqual([
+        ["items", 1, undefined, undefined],
+        ["tags", 1, undefined, undefined],
+      ]);
+      expect(read.operation).toBe(0x0503);
+      expect(read.payload.has(6)).toBe(false);
+      const cursor = await coll.find("items.id = 1", undefined, { paginate: "manual", unwind: twoSteps });
+      expect(steps(server.commands.at(-1)!)).toHaveLength(2);
+      await cursor.close();
+      await client.close();
+    });
+
+    test("a step needs a path, known values and at most eight steps", async () => {
+      const server = countServer();
+      const client = await open(server);
+      const coll = client.db().collection("docs");
+      const bad = (unwind: unknown) => ({ unwind: unwind as never });
+      for (const unwind of [
+        [{ path: "" }],
+        [{}],
+        [{ path: "a", mode: "first" }],
+        [{ path: "a", emit: "both" }],
+        [{ path: "a", nonArray: "ignore" }],
+        [{ path: "a", mode: "toString" }],
+        Array.from({ length: 9 }, (_, i) => ({ path: `p${i}` })),
+      ]) {
+        await expect(coll.find(undefined, undefined, bad(unwind)).toArray()).rejects.toThrow(TypeError);
+        await expect(coll.count(undefined, bad(unwind))).rejects.toThrow(TypeError);
+      }
+      expect(server.commands).toHaveLength(0);
+      await coll.count(undefined, { unwind: Array.from({ length: 8 }, (_, i) => ({ path: `p${i}` })) });
+      expect(steps(server.commands[0])).toHaveLength(8);
+      await client.close();
+    });
+
+    test("a server validation error reaches the caller with its code", async () => {
+      const server = new FakeServer();
+      server.handler = () => [errorFrame(ErrorCode.InvalidDocument, 0)];
+      const client = await open(server);
+      const failure = await client
+        .db()
+        .collection("docs")
+        .count(undefined, { unwind: [{ path: "a", mode: "all", emit: "source" }] })
+        .catch((e) => e);
+      expect(KdoqError.hasCode(failure, ErrorCode.InvalidDocument)).toBe(true);
+      await client.close();
+    });
+  });
+
   test("auto-pagination reads every page with CURSOR_READ", async () => {
     const server = new FakeServer();
     server.handler = (cmd) => {

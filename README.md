@@ -266,6 +266,18 @@ documents, `"analyze"` also observes one real execution.
 const [report] = await accounts.find("age >= 30", undefined, { explain: "plan" }).toArray();
 ```
 
+`find` and `count` also take `unwind`, a list of steps that turn the elements of arrays into documents
+before the filter runs (at most 8, nested in the order given). A step is `{ path, mode?, emit?, nonArray? }`:
+`mode` is `"all"` (every satisfying element, the default) or `"any"` (the first one per document);
+`emit` is `"element"` (the array is replaced by one element, the default) or `"source"` (the document
+is returned once, with `mode` defaulting to `"any"`); `nonArray` is `"skip"` (the default), `"error"` or
+`"single"` for a value that is not an array. Results are rows that keep the document key, and `count`
+counts rows. Results are not checked against `T`, so name the unwound shape as the type of `find`.
+
+```ts
+const lines = orders.find<{ items: { sku: string; qty: number } }>("items.qty > 2", undefined, { unwind: [{ path: "items" }] });
+```
+
 When statistics are requested, `page.statistics?.durationUs` on a manual cursor page
 reports the server handling time of that page in microseconds. This measurement is
 independent of budget accounting; `budgetUsed.activeNs` remains the cumulative

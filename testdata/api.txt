@@ -35,6 +35,7 @@ package @kdoq/kdoq
   interface Sessions
   interface Statistics
   interface TransportLike
+  interface UnwindStep
   interface WriteOptions
   type AccessLevel
   type ClientState
