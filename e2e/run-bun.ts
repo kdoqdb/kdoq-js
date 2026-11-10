@@ -53,10 +53,8 @@ try {
     join(directory, "config.yml"),
     JSON.stringify({
       data: { path: "db" },
-      http: {
-        listen: { http: "127.0.0.1:0", quic: "127.0.0.1:0" },
-        tls: { certificate: "cert.pem", private_key: "key.pem", allow_self_signed: true },
-      },
+      tls: { certificate: "cert.pem", private_key: "key.pem", allow_self_signed: true },
+      http: { listen: { http: "127.0.0.1:0", quic: "127.0.0.1:0" } },
       logging: { format: "json" },
       auth: { enabled: true, users: [{ username: config.username, password: config.password }] },
       native: { enabled: true },
