@@ -18,15 +18,18 @@ package @kdoq/kdoq
   interface Collection
   interface CollectionInfo
   interface ConnectOptions
+  interface ConnectionTiming
   interface Cursor
   interface Database
   interface DatabaseInfo
   interface Databases
   interface Diagnostic
+  interface FirstPage
   interface Item
   interface MutationResult
   interface OpOptions
   interface Operand
+  interface OperationTiming
   interface ParsedDsn
   interface Progress
   interface Query
@@ -48,6 +51,7 @@ package @kdoq/kdoq
   type ResourceState
   type Stage
   type Target
+  type TimingEvent
   type TransportFactory
 
 package @kdoq/kdoq/value

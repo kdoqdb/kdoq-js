@@ -109,6 +109,11 @@ async function scenario(c: Config, transport?: TransportFactory) {
   const second = await cursor.next();
   eq([first.items.length, second.items.length, second.done], [4, 2, true], "manual cursor pages");
   await cursor.close();
+  const firstPage = await docs.aggregatePage([{ match: "n >= 0" }], { pageSize: 4 });
+  check(firstPage.items.length === 4 && !firstPage.done && firstPage.cursor !== null, "aggregatePage first page");
+  const lastPage = await firstPage.cursor!.next();
+  eq([lastPage.items.length, lastPage.done], [2, true], "aggregatePage continuation");
+  check((await docs.aggregatePage([{ match: "n >= 0" }], { pageSize: 10 })).cursor === null, "aggregatePage last page has no cursor");
 
   const grouped = await docs.aggregate<number>([{ count: true }]).first();
   check(grouped?.value === 6, "count stage");

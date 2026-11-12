@@ -1,7 +1,9 @@
 import { type AccessLevel, ErrorCode, KdoqConnectionError, KdoqError, malformed } from "../errors.js";
-import { errorFromFrame, OperationStream, type BiStream, type OpSpec } from "./operation.js";
+import { errorFromFrame, OperationStream, type BiStream, type OperationObserver, type OpSpec } from "./operation.js";
 import { ScramClient } from "./scram.js";
 import { enc, Fields, frame, FrameReader, Kind } from "./wire.js";
+import { ms, type Trace } from "./trace.js";
+import type { ConnectionTiming, OperationTiming } from "../types.js";
 
 export interface CloseInfo {
   closeCode?: number;
@@ -38,6 +40,8 @@ export interface ConnectionSettings {
   connectTimeout: number;
   transport?: TransportFactory;
   nonce?: string;
+  trace?: Trace;
+  onTiming?: (event: ConnectionTiming | OperationTiming) => void;
 }
 
 const NONE = 0,
@@ -60,7 +64,13 @@ export class Connection {
   private resolveClosed!: (info: CloseInfo) => void;
   private fatal?: KdoqError;
 
-  private constructor(private readonly transport: TransportLike) {
+  private readonly phases: ConnectionTiming["phases"] = [];
+  private onTiming?: (event: ConnectionTiming | OperationTiming) => void;
+
+  private constructor(
+    private readonly transport: TransportLike,
+    private readonly trace?: Trace,
+  ) {
     this.closed = new Promise((resolve) => {
       this.resolveClosed = resolve;
     });
@@ -76,15 +86,28 @@ export class Connection {
       s.url,
       s.certificateHash ? { serverCertificateHashes: [{ algorithm: "sha-256", value: s.certificateHash }] } : {},
     );
-    const conn = new Connection(transport);
+    const conn = new Connection(transport, s.trace);
+    conn.onTiming = s.onTiming;
+    const opened = performance.now();
+    s.trace?.("connection", `opening ${s.url}${s.username === undefined ? "" : " with SCRAM"}`);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new KdoqConnectionError(`connecting timed out after ${s.connectTimeout} ms`)), s.connectTimeout);
     });
     try {
       await Promise.race([conn.setup(s), timeout]);
+      s.trace?.("connection", `ready, session ${conn.session.id}, total ${ms(opened)}`);
+      s.onTiming?.({ kind: "connection", startedAt: opened, readyAt: performance.now(), phases: conn.phases });
       return conn;
     } catch (e) {
+      s.trace?.("connection", `setup failed after ${ms(opened)}: ${(e as Error)?.message ?? e}`);
+      s.onTiming?.({
+        kind: "connection",
+        startedAt: opened,
+        readyAt: performance.now(),
+        phases: conn.phases,
+        failed: String((e as Error)?.message ?? e),
+      });
       conn.close();
       if (e instanceof KdoqError) throw e;
       throw new KdoqConnectionError(`cannot connect to ${s.url}: ${(e as Error)?.message ?? e}`, { cause: e });
@@ -94,8 +117,16 @@ export class Connection {
   }
 
   private async setup(s: ConnectionSettings): Promise<void> {
+    let mark = performance.now();
+    const phase = (id: string, label: string) => {
+      this.trace?.("connection", `${label} (+${ms(mark)})`);
+      mark = performance.now();
+      this.phases.push({ phase: id, at: mark });
+    };
     await this.transport.ready;
+    phase("transport", "transport ready (QUIC/TLS and WebTransport CONNECT)");
     const stream = await this.transport.createBidirectionalStream();
+    phase("stream", "control stream opened");
     this.control = { reader: new FrameReader(stream.readable, 8192 + 8), writer: stream.writable.getWriter() };
 
     const scram = s.username === undefined ? undefined : new ScramClient(s.username, s.password ?? "", s.nonce);
@@ -113,6 +144,7 @@ export class Connection {
     );
 
     const hello = await this.expect(Kind.HELLO);
+    phase("hello", "HELLO answered");
     if (hello.need(hello.u32(1), 1) !== 1 || hello.need(hello.u16(2), 2) !== 4)
       throw new KdoqError("the server selected an unsupported protocol version or encoding", { code: ErrorCode.Incompatible });
     this.capabilities = Number(hello.need(hello.u64(3), 3));
@@ -123,11 +155,14 @@ export class Connection {
     if (scram) {
       await this.send(frame(Kind.AUTH, enc.str(1, scram.first())));
       const serverFirst = await this.expect(Kind.AUTH);
+      phase("auth1", "AUTH client-first answered");
       await this.send(frame(Kind.AUTH, enc.str(1, await scram.final(serverFirst.need(serverFirst.str(1), 1)))));
       const serverFinal = await this.expect(Kind.AUTH);
+      phase("auth2", "AUTH client-final answered");
       scram.verify(serverFinal.need(serverFinal.str(1), 1));
     }
     const ready = await this.expect(Kind.READY);
+    phase("ready", "READY");
     this.session = { id: ready.need(ready.u64(1), 1), accessLevel: ready.need(ready.u8(2), 2) as AccessLevel };
     void this.controlLoop();
   }
@@ -169,6 +204,10 @@ export class Connection {
   private end(info: CloseInfo): void {
     if (!this.alive) return;
     this.alive = false;
+    this.trace?.(
+      "connection",
+      `ended${info.closeCode === undefined ? "" : `, close code ${info.closeCode}`}${info.reason ? `, ${info.reason}` : ""}`,
+    );
     for (const ack of this.acks.values()) ack(null);
     this.acks.clear();
     this.resolveClosed(info);
@@ -184,10 +223,21 @@ export class Connection {
     return this.fatal;
   }
 
-  async start(spec: OpSpec, signal?: AbortSignal): Promise<OperationStream> {
+  async start(spec: OpSpec, signal?: AbortSignal, call?: { requestedAt: number; connectionReadyAt: number }): Promise<OperationStream> {
     if (!this.alive) throw new KdoqConnectionError("the connection is closed");
+    const opening = performance.now();
     const stream = await this.transport.createBidirectionalStream();
-    return OperationStream.start(this, stream, this.frameCeiling, this.nextRequest++, spec, signal);
+    const requestId = this.nextRequest++;
+    this.trace?.(`op#${requestId}`, `stream opened (+${ms(opening)})`);
+    const observer: OperationObserver = {
+      trace: this.trace,
+      onTiming: this.onTiming as OperationObserver["onTiming"],
+      requestedAt: call?.requestedAt ?? opening,
+      connectionReadyAt: call?.connectionReadyAt ?? opening,
+      streamRequestedAt: opening,
+      streamOpenedAt: performance.now(),
+    };
+    return OperationStream.start(this, stream, this.frameCeiling, requestId, spec, signal, observer);
   }
 
   async cancel(requestId: number): Promise<void> {

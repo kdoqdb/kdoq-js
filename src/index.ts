@@ -33,7 +33,7 @@ export {
   type Outcome,
 } from "./errors.js";
 export { expr, type Operand } from "./expr.js";
-export type { BulkStatement, Cursor, Stage, Target } from "./types.js";
+export type { BulkStatement, ConnectionTiming, Cursor, FirstPage, OperationTiming, Stage, Target, TimingEvent } from "./types.js";
 export type {
   Budget,
   Diagnostic,

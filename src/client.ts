@@ -6,6 +6,8 @@ import { parseDsn, type ParsedDsn } from "./dsn.js";
 import type {
   Backoff,
   BulkItem,
+  FirstPage,
+  TimingEvent,
   BulkResult,
   Client,
   ClientState,
@@ -30,8 +32,9 @@ import type {
   Stage,
   Target,
 } from "./types.js";
-import { Cursor, aggregateSpec, QueryImpl, parseStatistics, type PaginateMode } from "./query.js";
+import { Cursor, aggregateSpec, firstPage, QueryImpl, parseStatistics, type PaginateMode } from "./query.js";
 import { RUNNER, type Runner, type Unary } from "./internal/runner.js";
+import { makeTrace, ms, opName, type Trace } from "./internal/trace.js";
 import { KeyBytes, NameDictionary, type Doc } from "./internal/codec.js";
 import { concat, enc, type Fields, utf8 } from "./internal/wire.js";
 
@@ -53,6 +56,17 @@ export interface ConnectOptions {
   /** Replaces the WebTransport constructor; for tests and embedding. */
   transport?: TransportFactory;
   maxFrameSize?: number;
+  /**
+   * Traces the protocol: `true` prints one line per connection phase, operation and response frame with
+   * `console.log`; a function receives the lines instead. Lines hold operation names, request ids, frame
+   * kinds, sizes and timings, never document or result values, keys, expressions or credentials.
+   */
+  trace?: boolean | ((line: string) => void);
+  /**
+   * Receives a structured timing event for each established connection and each finished operation, with
+   * `performance.now()` timestamps and no values or keys; see `TimingEvent`.
+   */
+  onTiming?: (event: TimingEvent) => void;
 }
 
 const STATES: Record<number, ResourceState> = { 1: "loaded", 2: "unavailable", 3: "unloaded", 4: "loading", 5: "unloading" };
@@ -134,11 +148,13 @@ class ClientImpl implements Client, Runner {
   private listeners = new Set<(state: ClientState, reason?: Error) => void>();
   private resolveClosed!: () => void;
   private rejectClosed!: (e: unknown) => void;
+  private readonly trace: Trace | undefined;
 
   constructor(
     private readonly cfg: Config,
     private readonly o: ConnectOptions,
   ) {
+    this.trace = makeTrace(o.trace);
     this.closed = new Promise((resolve, reject) => {
       this.resolveClosed = resolve;
       this.rejectClosed = reject;
@@ -163,6 +179,7 @@ class ClientImpl implements Client, Runner {
 
   private setState(state: ClientState, reason?: Error) {
     if (this.state === state) return;
+    this.trace?.("client", `state ${this.state} -> ${state}${reason ? ` (${reason.message})` : ""}`);
     this.state = state;
     for (const l of this.listeners) l(state, reason);
   }
@@ -193,6 +210,8 @@ class ClientImpl implements Client, Runner {
         frameCeiling: this.o.maxFrameSize ?? 64 * 1024 * 1024,
         connectTimeout: this.o.connectTimeout ?? 10000,
         transport: this.o.transport,
+        trace: this.trace,
+        onTiming: this.o.onTiming,
       });
       this.conn = conn;
       this.everConnected = true;
@@ -255,19 +274,26 @@ class ClientImpl implements Client, Runner {
       this.o.retry === false
         ? { attempts: 0, backoff: DEFAULT_BACKOFF }
         : { attempts: this.o.retry?.attempts ?? 3, backoff: { ...DEFAULT_BACKOFF, ...this.o.retry?.backoff } };
+    const requested = performance.now();
+    const name = opName(spec.operation);
     for (let attempt = 0; ; attempt++) {
       const abort = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
       try {
+        const reused = this.conn?.alive === true;
         const conn = await Promise.race([this.ensure(), abort]);
-        const stream = await conn.start(spec, signal);
+        const connectionReadyAt = performance.now();
+        this.trace?.("client", `${name} requested; ${reused ? "connection reused" : "waited for a new connection"} (+${ms(requested)})`);
+        const stream = await conn.start(spec, signal, { requestedAt: requested, connectionReadyAt });
         const first = await Promise.race([stream.next(), abort]);
         if (first?.kind !== "begin") {
           await stream.cancel();
           throw new KdoqError("the server did not start the response with BEGIN", { code: ErrorCode.Malformed });
         }
         established();
+        this.trace?.(`op#${stream.requestId}`, `${name} BEGIN received ${ms(requested)} after the call`);
         return stream;
       } catch (e) {
+        this.trace?.("client", `${name} attempt ${attempt + 1} failed after ${ms(requested)}: ${(e as Error)?.message ?? e}`);
         if (isFatal(e)) this.fail(e as KdoqError);
         if (!retryable(e) || attempt >= retry.attempts) throw e;
         const b = retry.backoff;
@@ -493,6 +519,10 @@ class CollectionImpl implements Collection {
     return new QueryImpl(this.runner, this.database, this.name, pipeline, rest, paginate) as unknown as Query & Promise<Cursor>;
   }
 
+  aggregatePage(pipeline: readonly PipelineStage[], options: AggregateOptions = {}): Promise<FirstPage> {
+    return firstPage(this.runner, this.database, this.name, pipeline, options);
+  }
+
   private async manualCursor(pipeline: readonly PipelineStage[], o: AggregateOptions): Promise<Cursor> {
     const stream = await this.runner.open(aggregateSpec(this.database, this.name, pipeline, o, 0), o);
     const id = stream.begin?.u64(1);
@@ -536,6 +566,7 @@ export async function connect(dsn: string | null, options: ConnectOptions = {}):
 export type {
   Backoff,
   BulkItem,
+  FirstPage,
   BulkResult,
   Client,
   ClientState,

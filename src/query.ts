@@ -8,6 +8,7 @@ import type {
   Cursor as CursorApi,
   Explain,
   AggregateOptions,
+  FirstPage,
   Item,
   PipelineStage,
   Query,
@@ -319,4 +320,33 @@ export class Cursor implements CursorApi {
     this.open = false;
     await this.runner.unary(closeSpec(this.id));
   }
+}
+
+/** Creates the query and reads its first page in one operation; see `Collection.aggregatePage`. */
+export async function firstPage(
+  runner: Runner,
+  db: string,
+  coll: string,
+  pipeline: readonly PipelineStage[],
+  o: AggregateOptions,
+): Promise<FirstPage> {
+  const size = Math.min(o.pageSize ?? DEFAULT_PAGE_SIZE, 10000);
+  const stream = await runner.open(aggregateSpec(db, coll, pipeline, o, size), o);
+  const id = stream.begin?.u64(1);
+  const items: Item[] = [];
+  let next: number | bigint = 0;
+  let statistics: Statistics | undefined;
+  try {
+    for await (const item of readResponse(stream, o, (end) => {
+      next = end.u64(1) ?? 0;
+      const stats = end.group(2);
+      if (stats) statistics = parseStatistics(stats);
+    }))
+      items.push(item);
+  } catch (e) {
+    // A failure after BEGIN can leave the cursor open; nobody holds its id, so release it here.
+    if (id) await runner.unary(closeSpec(id), { timeout: 5000 }).catch(() => {});
+    throw e;
+  }
+  return { items, done: !next, ...(statistics ? { statistics } : {}), cursor: next ? new Cursor(runner, next, o.pageSize) : null };
 }

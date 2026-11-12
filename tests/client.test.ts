@@ -376,6 +376,130 @@ describe("queries", () => {
     await client.close();
   });
 
+  test("aggregatePage returns the first page and its cursor in one operation", async () => {
+    const server = new FakeServer();
+    server.handler = (cmd) => {
+      if (cmd.operation === 0x0505) return page(4, [{ n: 0 }, { n: 1 }], 4);
+      if (cmd.operation === 0x0503) return page(4, [{ n: 2 }], 0);
+      return [encodeFrame(Kind.BEGIN), encodeFrame(Kind.END)];
+    };
+    const client = await open(server);
+    const first = await client
+      .db()
+      .collection("docs")
+      .aggregatePage([{ match: "true" }], { pageSize: 2 });
+    expect(server.commands.map((c) => c.operation)).toEqual([0x0505]);
+    expect(server.commands[0].payload.group(4)!.group(1)!.u32(1)).toBe(2);
+    expect(first.items.map((i) => i.value)).toEqual([{ n: 0 }, { n: 1 }]);
+    expect(first.done).toBe(false);
+    expect(first.cursor!.id).toBe(4);
+    const rest = await first.cursor!.next();
+    expect(rest.items.map((i) => i.value)).toEqual([{ n: 2 }]);
+    expect(rest.done).toBe(true);
+    expect(server.commands.map((c) => c.operation)).toEqual([0x0505, 0x0503]);
+    await client.close();
+  });
+
+  test("aggregatePage has no cursor when the first page is the last", async () => {
+    const server = new FakeServer();
+    server.handler = () => page(0, [42], 0);
+    const client = await open(server);
+    const first = await client
+      .db()
+      .collection("docs")
+      .aggregatePage([{ count: true }]);
+    expect(first.items.map((i) => i.value)).toEqual([42]);
+    expect(first.done).toBe(true);
+    expect(first.cursor).toBeNull();
+    expect(server.commands.map((c) => c.operation)).toEqual([0x0505]);
+    await client.close();
+  });
+
+  test("aggregatePage releases the cursor when the page fails after BEGIN", async () => {
+    const server = new FakeServer();
+    server.handler = (cmd) => {
+      if (cmd.operation === 0x0505) return [frame(Kind.BEGIN, enc.u64(1, 9), enc.u64(2, 9)), errorFrame(ErrorCode.Unavailable)];
+      return [encodeFrame(Kind.BEGIN), encodeFrame(Kind.END)];
+    };
+    const client = await open(server);
+    await expect(client.db().collection("docs").aggregatePage([])).rejects.toThrow();
+    expect(server.commands.find((c) => c.operation === 0x0504)!.payload.u64(1)).toBe(9);
+    await client.close();
+  });
+
+  test("trace reports operations, frames and timings without values or credentials", async () => {
+    const server = new FakeServer({ auth: { user: "al", password: "password-marker" } });
+    server.handler = (cmd) => {
+      if (cmd.operation === 0x0505) return page(4, [{ secret: "document-marker" }], 4);
+      return [encodeFrame(Kind.BEGIN), encodeFrame(Kind.END)];
+    };
+    const lines: string[] = [];
+    const client = await open(server, "kdoq://al:password-marker@localhost/app", { trace: (line: string) => lines.push(line) });
+    const first = await client
+      .db()
+      .collection("docs")
+      .aggregatePage([{ match: "name == 'expression-marker'" }]);
+    await first.cursor!.close();
+    await client.close();
+    const text = lines.join("\n");
+    expect(text).toContain("AGGREGATE(0x0505)");
+    expect(text).toContain("CURSOR_CLOSE(0x0504)");
+    expect(text).toMatch(/connection ready, session/);
+    expect(text).toContain("AUTH client-final answered");
+    expect(text).toMatch(/op#\d+ AGGREGATE\(0x0505\) BEGIN, \d+ bytes/);
+    expect(text).toMatch(/END, \d+ bytes; items=1/);
+    for (const marker of ["document-marker", "password-marker", "expression-marker", "docs"]) expect(text).not.toContain(marker);
+    expect(lines.every((line) => line.startsWith("[kdoq "))).toBe(true);
+  });
+
+  test("onTiming reports each connection and finished operation with ordered timestamps", async () => {
+    const server = new FakeServer({ auth: { user: "al", password: "secret" } });
+    server.handler = (cmd) =>
+      cmd.operation === 0x0505 ? page(4, [{ n: 1 }, { n: 2 }], 4) : [encodeFrame(Kind.BEGIN), encodeFrame(Kind.END)];
+    const events: import("../src").TimingEvent[] = [];
+    const client = await open(server, "kdoq://al:secret@localhost/app", { onTiming: (e: import("../src").TimingEvent) => events.push(e) });
+    const first = await client.db().collection("docs").aggregatePage([]);
+    await first.cursor!.close();
+    await client.close();
+    const connection = events.find((e) => e.kind === "connection")!;
+    expect(connection.kind === "connection" && connection.phases.map((p) => p.phase)).toEqual([
+      "transport",
+      "stream",
+      "hello",
+      "auth1",
+      "auth2",
+      "ready",
+    ]);
+    const operations = events.filter((e) => e.kind === "operation");
+    expect(operations.map((o) => o.name)).toEqual(["AGGREGATE(0x0505)", "CURSOR_CLOSE(0x0504)"]);
+    const [aggregate] = operations;
+    expect(aggregate.items).toBe(2);
+    expect(aggregate.outcome).toBe("ok");
+    expect(aggregate.responseBytes).toBeGreaterThan(0);
+    const t = [
+      aggregate.requestedAt,
+      aggregate.connectionReadyAt,
+      aggregate.streamRequestedAt,
+      aggregate.streamOpenedAt,
+      aggregate.beginAt!,
+      aggregate.firstItemAt!,
+      aggregate.endAt,
+    ];
+    expect([...t].sort((a, b) => a - b)).toEqual(t);
+    expect(JSON.stringify(events)).not.toMatch(/secret|"n"/);
+  });
+
+  test("onTiming reports a server error with its code and a failed connection", async () => {
+    const server = new FakeServer();
+    server.handler = () => [frame(Kind.BEGIN, enc.u64(1, 1), enc.u64(2, 1)), errorFrame(ErrorCode.Unavailable)];
+    const events: import("../src").TimingEvent[] = [];
+    const client = await open(server, null, { host: "localhost", onTiming: (e: import("../src").TimingEvent) => events.push(e) });
+    await expect(client.db("app").collection("docs").aggregatePage([])).rejects.toThrow();
+    const failed = events.find((e) => e.kind === "operation" && e.outcome === "error");
+    expect(failed?.kind === "operation" && failed.errorCode).toBe(ErrorCode.Unavailable);
+    await client.close();
+  });
+
   test("count is an ordinary unkeyed numeric result and reduction supports onError", async () => {
     const server = new FakeServer();
     server.handler = () => page(0, [42], 0);

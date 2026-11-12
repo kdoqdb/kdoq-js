@@ -309,6 +309,34 @@ for await (const item of accounts.aggregate<number>(byCountry)) {
 The stages are `project`, `match`, `reduce`, `count` and `unwind`. Stages may repeat in any order.
 A reduction accepts `onError: "abort"` (default) or `"skipGroup"` to drop failing groups with diagnostics.
 
+### Tracing
+
+`connect(dsn, { trace: true })` prints the protocol to `console.log`: connection phases (transport, HELLO,
+each AUTH exchange, READY), then for every operation when it was requested, whether a connection was reused
+or had to be opened, the stream, each response frame with its size and the time since the request, and the
+item count at the end. Pass a function instead of `true` to receive the lines. Lines hold operation names,
+request ids, frame kinds, sizes and timings only, never values, keys, expressions or credentials.
+
+`onTiming` is the same information as data: it receives one event per established connection (when each setup
+step finished) and one per finished operation (when it was requested, got its stream, was acknowledged, began,
+returned its first item and ended), as `performance.now()` milliseconds. Server work is not part of it; read
+`durationUs` from the page statistics.
+
+### First page
+
+`aggregatePage` runs the pipeline and returns its first page in a single operation, with the cursor that
+continues it. `cursor` is `null` when the page was the last, so nothing is left open on the server.
+
+```ts
+const first = await accounts.aggregatePage([{ match: "age >= 30" }], { pageSize: 50 });
+show(first.items);
+if (first.cursor) show((await first.cursor.next()).items);
+```
+
+Prefer it to `paginate: "manual"` unless the cursor must exist before anything is read: `"manual"`
+creates the cursor with no items and reads the first page in a second operation, which costs one more
+network round trip. With `aggregatePage` the snapshot is taken together with the first page.
+
 ### Cursors
 
 A cursor is advanced by hand, for example behind a "load more" button. `aggregate` with

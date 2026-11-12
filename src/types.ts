@@ -212,6 +212,61 @@ export interface Cursor {
   close(): Promise<void>;
 }
 
+/** A page read together with the creation of its cursor: one operation instead of two. */
+export interface FirstPage {
+  items: Item[];
+  done: boolean;
+  statistics?: Statistics;
+  /** Reads the pages after this one; `null` when this page was the last (nothing is left open on the server). */
+  cursor: Cursor | null;
+}
+
+/**
+ * Timestamps of one operation, in `performance.now()` milliseconds. The server work is not in it: read
+ * `durationUs` from the statistics of the page.
+ */
+export interface OperationTiming {
+  kind: "operation";
+  requestId: number;
+  /** The operation code, for example `0x0505` for AGGREGATE. */
+  operation: number;
+  /** The operation code spelled out, for example `AGGREGATE(0x0505)`. */
+  name: string;
+  /** The call reached the client. */
+  requestedAt: number;
+  /** A connection was available (later than `requestedAt` when one had to be opened). */
+  connectionReadyAt: number;
+  /** The stream was asked for, and then granted. */
+  streamRequestedAt: number;
+  streamOpenedAt: number;
+  /** The whole request was written and its stream closed (the peer's acknowledgment, in a browser). */
+  sentAt?: number;
+  /** The server began its response; it does so as soon as it starts handling the request. */
+  beginAt?: number;
+  firstItemAt?: number;
+  /** END or ERROR arrived, or the stream failed or was cancelled. */
+  endAt: number;
+  items: number;
+  /** Payload bytes of every response frame. */
+  responseBytes: number;
+  outcome: "ok" | "error" | "cancelled";
+  /** The protocol error code of a server ERROR. */
+  errorCode?: number;
+}
+
+/** How a connection was established, with the time each setup step finished. */
+export interface ConnectionTiming {
+  kind: "connection";
+  startedAt: number;
+  readyAt: number;
+  /** `transport`, `stream`, `hello`, `auth1`, `auth2`, `ready`; SCRAM steps only with credentials. */
+  phases: { phase: string; at: number }[];
+  /** The reason, when the connection could not be established. */
+  failed?: string;
+}
+
+export type TimingEvent = OperationTiming | ConnectionTiming;
+
 export interface Database {
   readonly name: string;
   readonly collections: {
@@ -256,6 +311,13 @@ export interface Collection<T extends Doc = Doc> {
    */
   aggregate<R = T>(pipeline: readonly PipelineStage[], options?: AggregateOptions & { paginate?: true | false }): Query<R>;
   aggregate(pipeline: readonly PipelineStage[], options: AggregateOptions & { paginate: "manual" }): Promise<Cursor>;
+  /**
+   * Runs one ordered pipeline and returns its first page in a single operation, with the cursor that
+   * continues it. `paginate: "manual"` instead creates the cursor first, with no items, and reads the first
+   * page in a second operation; use it when the cursor must exist (for example to attach it elsewhere)
+   * before anything is read. The snapshot is taken with the first page.
+   */
+  aggregatePage(pipeline: readonly PipelineStage[], options?: AggregateOptions): Promise<FirstPage>;
   readonly info: Promise<CollectionInfo>;
   create(): Promise<void>;
   load(): Promise<void>;
