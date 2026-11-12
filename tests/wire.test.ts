@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { enc, encodeFrame, encodeU32V, Fields, frame, FrameReader, Kind, readU32V, utf8 } from "../src/internal/wire";
 import { NameDictionary } from "../src/internal/codec";
 import { dictionaryFrames, encodeStatement, expr } from "../src/internal/mutations";
-import { createSpec, encodeUnwind } from "../src/query";
+import { aggregateSpec } from "../src/query";
 import { parseDsn } from "../src/dsn";
 import { KdoqConfigError } from "../src/errors";
 
@@ -45,28 +45,26 @@ describe("reference bytes", () => {
     expect(hex(frames[0])).toBe("01 01 00 00 10 00 00 00 82 0e 81 0c 81 0a 81 03 81 01 61 82 03 82 01 31");
   });
 
-  // Derived from the schema (`crates/kdoq-proto/src/schema/query.rs`): the kdoq protocol tests build
-  // the group with a helper and hold no literal bytes for it.
-  test("unwind group of QUERY_CREATE and QUERY_COUNT (field 6)", () => {
-    const group = encodeUnwind([
-      { path: "items", mode: "any" },
-      { path: "tags", emit: "source", nonArray: "single" },
-    ]);
-    expect(group).toHaveLength(1);
-    expect(hex(group[0])).toBe("86 1a 81 0a 81 05 69 74 65 6d 73 82 01 01 81 0c 81 04 74 61 67 73 83 01 01 84 01 02");
-    // Only mode, emit and non_array are numeric: all 0 / any 1, element 0 / source 1, skip 0 / error 1 / single 2.
-    expect(hex(encodeUnwind([{ path: "a", mode: "all", emit: "element", nonArray: "skip" }])[0])).toBe(
-      "86 0e 81 0c 81 01 61 82 01 00 83 01 00 84 01 00",
+  // Independent fixture from the Native AGGREGATE schema: pipeline=3, options=4,
+  // match=4, unwind=5 (path=1, non_array=2), count=3.
+  test("AGGREGATE payload with ordered unwind, match and count", () => {
+    const spec = aggregateSpec(
+      "Test",
+      "Docs",
+      [{ unwind: { path: "a", nonArray: "single" } }, { match: "true" }, { count: true }],
+      {},
+      undefined,
     );
-    expect(encodeUnwind([])).toEqual([]);
-    expect(encodeUnwind(undefined)).toEqual([]);
+    expect(spec.operation).toBe(0x0505);
+    expect(hex(spec.payload!)).toBe(
+      "81 04 54 65 73 74 82 04 44 6f 63 73 83 10 85 06 81 01 61 82 01 02 84 04 74 72 75 65 83 00 84 0b 83 09 81 01 00 82 01 00 83 01 00",
+    );
   });
 
-  test("QUERY_CREATE payload ends with the unwind group after the options", () => {
-    const { payload } = createSpec("Test", "Docs", undefined, undefined, { unwind: [{ path: "a" }] }, undefined);
-    const f = new Fields(payload!);
-    expect(hex(f.bin(6)!)).toBe("81 03 81 01 61");
-    expect(Array.from(payload!.subarray(-7))).toEqual([...bytes("86 05 81 03 81 01 61")]);
+  test("empty aggregate still sends the required pipeline group", () => {
+    const f = new Fields(aggregateSpec("Test", "Docs", [], {}, undefined).payload!);
+    expect(f.bin(3)).toEqual(new Uint8Array());
+    expect(f.has(5) || f.has(6)).toBe(false);
   });
 
   test("DICTIONARY and document INPUT_VALUE", () => {

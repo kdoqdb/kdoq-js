@@ -1,7 +1,7 @@
 // The end-to-end scenario against a real kdoq process. `browser.ts` runs it in Chrome (started by
 // run.py) and `run-bun.ts` in Bun with a WebTransport polyfill; `bun test` does not run it.
-import { connect, ErrorCode, expr, KdoqError, type Client, type TransportFactory } from "../src";
-import { format, KeyBytes } from "../src/value";
+import { connect, ErrorCode, expr, KdoqError, type Client, type PipelineStage, type TransportFactory } from "../src";
+import { format, KeyBytes, GroupKey } from "../src/value";
 
 export interface Config {
   host: string;
@@ -87,42 +87,47 @@ async function scenario(c: Config, transport?: TransportFactory) {
   );
   check(bulk.executed === 3 && bulk.items.length === 3 && bulk.items.every((i) => i.status === null), "bulk");
 
-  const total = await docs.count();
+  const total = (await docs.aggregate<number>([{ count: true }]).first())?.value;
   check(total === 6, `count ${total}`);
-  check((await docs.count("n >= 10")) === 2, "count with filter");
+  check((await docs.aggregate<number>([{ match: "n >= 10" }, { count: true }]).first())?.value === 2, "count with filter");
 
-  const all = await docs.find().toArray();
-  check(all.length === 6 && all.every((i) => i.key instanceof KeyBytes), "find streams every document with keys");
+  const all = await docs.aggregate([]).toArray();
+  check(all.length === 6 && all.every((i) => i.key instanceof KeyBytes), "aggregate streams every document with keys");
   const paged = [];
-  for await (const item of docs.find("n >= 0", undefined, { pageSize: 2 })) paged.push(item);
+  for await (const item of docs.aggregate([{ match: "n >= 0" }], { pageSize: 2 })) paged.push(item);
   check(paged.length === 6, "auto-pagination over several pages");
-  const q = docs.find("n >= 0", undefined, { pageSize: 2 });
+  const q = docs.aggregate([{ match: "n >= 0" }], { pageSize: 2 });
   let taken = 0;
   for await (const _ of q) {
     if (++taken === 3) break;
   }
-  check(taken === 3, "break out of a paginated find");
-  const whole = await docs.find("n >= 0", undefined, { paginate: false }).toArray();
-  check(whole.length === 6, "unpaginated find");
-  const cursor = await docs.find("n >= 0", undefined, { paginate: "manual", pageSize: 4 });
+  check(taken === 3, "break out of a paginated aggregate");
+  const whole = await docs.aggregate([{ match: "n >= 0" }], { paginate: false }).toArray();
+  check(whole.length === 6, "unpaginated aggregate");
+  const cursor = await docs.aggregate([{ match: "n >= 0" }], { paginate: "manual", pageSize: 4 });
   const first = await cursor.next();
   const second = await cursor.next();
   eq([first.items.length, second.items.length, second.done], [4, 2, true], "manual cursor pages");
   await cursor.close();
 
-  const grouped = await docs.find<number>("true", [{ count: true }]).first();
+  const grouped = await docs.aggregate<number>([{ count: true }]).first();
   check(grouped?.value === 6, "count stage");
-  const projected = await docs.find("n == 1", [{ project: "{n: n, twice: n * 2}" }]).toArray();
+  const projected = await docs.aggregate([{ match: "n == 1" }, { project: "{n: n, twice: n * 2}" }]).toArray();
   eq(
     projected.map((i) => i.value),
     [{ n: 1, twice: 2 }],
     "projection stage",
   );
-  const stats = docs.find("n == 1", undefined, { observe: { statistics: true } });
-  await stats.toArray();
-  check((await stats.statistics)?.documents.selected === 1, "statistics");
+  const reduced = await docs
+    .aggregate<number>([{ reduce: { key: "'all'", initial: "0", accumulate: "$prev + 1", onError: "skipGroup" } }])
+    .first();
+  check(reduced?.key instanceof GroupKey && reduced.key.value === "all" && reduced.value === 6, "reduction with onError and a group key");
+  const stats = docs.aggregate([{ match: "n == 1" }], { observe: { statistics: true } });
+  check((await stats.toArray()).length === 1, "observed aggregate returns matching rows");
+  const statistics = await stats.statistics;
+  check(statistics?.durationUs !== undefined && statistics.memory !== undefined, "aggregate statistics include duration and memory");
 
-  // Unwind steps: one flat filter about one element of each array, rows that keep the document key.
+  // Ordered unwind stages retain document keys and emit every combination.
   await db.collections.create("Orders");
   const orders = db.collection("Orders");
   const tag = (color: string, size: string) => ({ color, size });
@@ -144,24 +149,8 @@ async function scenario(c: Config, transport?: TransportFactory) {
   await orders.put("o4", { items: "pen", tags: [] });
   const flat = "items.sku == 'pen' and items.qty > 100 and tags.color == 'red'";
   type Unwound = { items: { sku: string; qty: number }; tags: { color: string; size: string } };
-  const matched = await orders
-    .find<Unwound>(flat, [{ project: "{items: items, tags: tags}" }], {
-      unwind: [
-        { path: "items", mode: "any" },
-        { path: "tags", mode: "any" },
-      ],
-    })
-    .toArray();
-  eq(
-    matched.map((i) => [(i.key as KeyBytes).text(), i.value.items.qty, i.value.tags.size]),
-    [
-      ["o1", 150, "s"],
-      ["o3", 200, "m"],
-    ],
-    "unwind with mode any returns the first matched element of each array",
-  );
-  const unwound = [{ path: "items" }, { path: "tags" }];
-  const rows = await orders.find<Unwound>(flat, undefined, { unwind: unwound }).toArray();
+  const unwound: PipelineStage[] = [{ unwind: { path: "items" } }, { unwind: { path: "tags" } }];
+  const rows = await orders.aggregate<Unwound>([...unwound, { match: flat }]).toArray();
   eq(
     rows.map((i) => [(i.key as KeyBytes).text(), i.value.items.qty, i.value.tags.size]),
     [
@@ -171,41 +160,30 @@ async function scenario(c: Config, transport?: TransportFactory) {
       ["o3", 300, "m"],
       ["o3", 300, "s"],
     ],
-    "unwind with the default mode all returns every combination, keyed by its document",
+    "unwind returns every combination, keyed by its document",
   );
-  eq(await orders.count(flat, { unwind: unwound }), 5, "count counts the rows of all steps");
-  eq(
-    await orders.count(flat, {
-      unwind: [
-        { path: "items", mode: "any" },
-        { path: "tags", mode: "any" },
-      ],
-    }),
-    2,
-    "count with mode any",
-  );
-  const source = await orders.find("items.sku == 'pen'", undefined, { unwind: [{ path: "items", emit: "source" }] }).toArray();
-  eq(
-    source.map((i) => [(i.key as KeyBytes).text(), (i.value.items as unknown[]).length]),
-    [
-      ["o1", 2],
-      ["o2", 1],
-      ["o3", 2],
-    ],
-    "emit source returns each document once with its array",
-  );
-  eq(
-    await orders.count("items == 'pen'", { unwind: [{ path: "items", nonArray: "single" }] }),
-    1,
-    "nonArray single treats a value that is not an array as one element",
-  );
-  const refused = await orders.count(undefined, { unwind: [{ path: "items", mode: "all", emit: "source" }] }).catch((e) => e);
-  check(refused instanceof KdoqError && refused.code === ErrorCode.InvalidDocument, "mode all with emit source is rejected by the server");
-  const [report] = await orders.find(flat, undefined, { explain: "plan", unwind: unwound }).toArray();
-  check(
-    JSON.stringify(report.value, (_, v) => (typeof v === "bigint" ? `${v}n` : v)).includes('"unwind"'),
-    "explain plan lists the unwind steps",
-  );
+  const counted = await orders.aggregate<number>([...unwound, { match: flat }, { count: true }]).first();
+  eq(counted?.value, 5, "count counts every unwound row");
+  check(counted?.key === undefined, "count returns an unkeyed item");
+  const empty = await orders.aggregate<number>([{ match: "false" }, { count: true }]).first();
+  eq(empty?.value, 0, "count returns zero for empty input");
+  const scalar = await orders
+    .aggregate<number>([{ unwind: { path: "items", nonArray: "single" } }, { match: "items == 'pen'" }, { count: true }])
+    .first();
+  eq(scalar?.value, 1, "nonArray single treats a scalar as one element");
+  const projectedRows = await orders
+    .aggregate([{ project: "{lines: items}" }, { unwind: { path: "lines" } }, { match: "lines.qty > 100" }, { count: true }])
+    .first();
+  eq(projectedRows?.value, 3, "unwind runs after projection on the current item");
+  for (const explain of ["plan", "analyze"] as const) {
+    const reports = await orders.aggregate([{ count: true }], { explain }).toArray();
+    check(reports.length === 1 && reports[0].key === undefined, `aggregate explain ${explain} returns one unkeyed report`);
+  }
+  const unsupportedExplain = await orders
+    .aggregate([...unwound, { match: flat }], { explain: "plan" })
+    .toArray()
+    .catch((e) => e);
+  check(KdoqError.hasCode(unsupportedExplain, ErrorCode.InvalidDocument), "explain rejects unsupported aggregate pipeline shapes");
 
   const sessions = await client.sessions.list();
   check(

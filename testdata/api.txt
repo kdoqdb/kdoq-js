@@ -9,6 +9,7 @@ package @kdoq/kdoq
   const expr
   function connect
   function parseDsn
+  interface AggregateOptions
   interface Budget
   interface BulkItem
   interface BulkResult
@@ -22,7 +23,6 @@ package @kdoq/kdoq
   interface DatabaseInfo
   interface Databases
   interface Diagnostic
-  interface FindOptions
   interface Item
   interface MutationResult
   interface OpOptions
@@ -35,11 +35,10 @@ package @kdoq/kdoq
   interface Sessions
   interface Statistics
   interface TransportLike
-  interface UnwindStep
+  interface UnwindStage
   interface WriteOptions
   type AccessLevel
   type ClientState
-  type CountOptions
   type ErrorCode
   type Explain
   type Key

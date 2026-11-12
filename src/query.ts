@@ -7,79 +7,57 @@ import type {
   Budget,
   Cursor as CursorApi,
   Explain,
-  FindOptions,
+  AggregateOptions,
   Item,
   PipelineStage,
   Query,
   QueryOptions,
   Statistics,
-  UnwindStep,
   N,
 } from "./types.js";
 
 export type {
   Budget,
-  CountOptions,
   Diagnostic,
   Explain,
-  FindOptions,
+  AggregateOptions,
   Item,
   PipelineStage,
   Progress,
   Query,
   QueryOptions,
   Statistics,
-  UnwindStep,
+  UnwindStage,
 } from "./types.js";
 
 export const DEFAULT_PAGE_SIZE = 1000;
 
+const UNWIND_NON_ARRAY = { skip: 0, error: 1, single: 2 } as const;
+const ON_ERROR = { abort: 0, skipGroup: 1 } as const;
+
+function policy(id: number, name: string, codes: Record<string, number>, value: string | undefined): Uint8Array[] {
+  if (value === undefined) return [];
+  if (!Object.hasOwn(codes, value)) throw new TypeError(`${name} must be ${Object.keys(codes).join(", ")}, got ${String(value)}`);
+  return [enc.u8(id, codes[value])];
+}
+
 const stageFields = (s: PipelineStage): Uint8Array => {
   if ("project" in s) return enc.str(1, s.project);
-  if ("reduce" in s) return enc.group(2, enc.str(1, s.reduce.key), enc.str(2, s.reduce.initial), enc.str(3, s.reduce.accumulate));
+  if ("reduce" in s)
+    return enc.group(
+      2,
+      enc.str(1, s.reduce.key),
+      enc.str(2, s.reduce.initial),
+      enc.str(3, s.reduce.accumulate),
+      ...policy(4, "reduce onError", ON_ERROR, s.reduce.onError),
+    );
   if ("count" in s) return enc.group(3);
-  return enc.str(4, s.match);
+  if ("match" in s) return enc.str(4, s.match);
+  if (typeof s.unwind?.path !== "string" || s.unwind.path === "") throw new TypeError("unwind needs a non-empty path");
+  return enc.group(5, enc.str(1, s.unwind.path), ...policy(2, "unwind nonArray", UNWIND_NON_ARRAY, s.unwind.nonArray));
 };
 
-export const encodePipeline = (stages: PipelineStage[] | undefined): Uint8Array[] =>
-  stages?.length ? [enc.group(4, ...stages.map(stageFields))] : [];
-
-/** The most unwind steps one query or count takes. */
-export const MAX_UNWIND_STEPS = 8;
-
-const UNWIND_MODES = { all: 0, any: 1 } as const;
-const UNWIND_EMITS = { element: 0, source: 1 } as const;
-const UNWIND_NON_ARRAY = { skip: 0, error: 1, single: 2 } as const;
-
-/**
- * The `unwind` group (field 6 of the create and count commands), or nothing for no steps. A property
- * that is left out is not sent, so the server applies its defaults; the server also decides which
- * combinations are valid.
- */
-export function encodeUnwind(steps: readonly UnwindStep[] | undefined): Uint8Array[] {
-  if (!steps?.length) return [];
-  if (steps.length > MAX_UNWIND_STEPS) throw new TypeError(`a query takes at most ${MAX_UNWIND_STEPS} unwind steps, got ${steps.length}`);
-  const code = (id: number, name: string, codes: Record<string, number>, v: string | undefined) => {
-    if (v === undefined) return [];
-    if (!Object.hasOwn(codes, v)) throw new TypeError(`unwind ${name} must be ${Object.keys(codes).join(", ")}, got ${String(v)}`);
-    return [enc.u8(id, codes[v])];
-  };
-  return [
-    enc.group(
-      6,
-      ...steps.map((s, i) => {
-        if (typeof s?.path !== "string" || s.path === "") throw new TypeError(`unwind step ${i + 1} needs a non-empty path`);
-        return enc.group(
-          1,
-          enc.str(1, s.path),
-          ...code(2, "mode", UNWIND_MODES, s.mode),
-          ...code(3, "emit", UNWIND_EMITS, s.emit),
-          ...code(4, "nonArray", UNWIND_NON_ARRAY, s.nonArray),
-        );
-      }),
-    ),
-  ];
-}
+export const encodePipeline = (stages: readonly PipelineStage[]): Uint8Array => enc.group(3, ...stages.map(stageFields));
 
 const optional = (fields: Array<Uint8Array | undefined>): Uint8Array[] => fields.filter((f): f is Uint8Array => f !== undefined);
 const u64 = (id: number, v: number | undefined) => (v === undefined ? undefined : enc.u64(id, v));
@@ -106,12 +84,11 @@ function observeGroup(o: QueryOptions): Uint8Array {
   );
 }
 
-export function createSpec(
+export function aggregateSpec(
   db: string,
   coll: string,
-  filter: string | undefined,
-  pipeline: PipelineStage[] | undefined,
-  o: FindOptions,
+  pipeline: readonly PipelineStage[],
+  o: AggregateOptions,
   pageSize: number | undefined,
 ): OpSpec {
   const page =
@@ -123,14 +100,13 @@ export function createSpec(
       ? [enc.group(2, ...optional([u64(1, o.window.skip), u64(2, o.window.limit)]))]
       : [];
   return {
-    operation: 0x0501,
+    operation: 0x0505,
     payload: new Uint8Array([
       ...enc.str(1, db),
       ...enc.str(2, coll),
-      ...(filter === undefined ? [] : enc.str(3, filter)),
-      ...encodePipeline(pipeline).flatMap((f) => [...f]),
+      ...encodePipeline(pipeline),
       ...enc.group(
-        5,
+        4,
         ...page,
         ...window,
         observeGroup(o),
@@ -138,7 +114,6 @@ export function createSpec(
         ...(o.pruning === undefined ? [] : [enc.bool(5, o.pruning)]),
         ...(o.explain === undefined ? [] : [enc.u8(6, EXPLAIN_CODES[o.explain] ?? invalidExplain(o.explain))]),
       ),
-      ...encodeUnwind(o.unwind).flatMap((f) => [...f]),
     ]),
   };
 }
@@ -214,7 +189,7 @@ async function* readResponse(stream: OperationStream, o: QueryOptions, onEnd: (e
 
 export type PaginateMode = boolean | "manual";
 
-/** `find` with `paginate: true` (pages read transparently) or `false` (one stream). */
+/** `aggregate` with `paginate: true` (pages read transparently) or `false` (one stream). */
 export class QueryImpl implements Query {
   cursorId: number | bigint | null = null;
   readonly statistics: Promise<Statistics | undefined>;
@@ -227,9 +202,8 @@ export class QueryImpl implements Query {
     private readonly runner: Runner,
     private readonly db: string,
     private readonly coll: string,
-    private readonly filter: string | undefined,
-    private readonly pipeline: PipelineStage[] | undefined,
-    private readonly options: FindOptions,
+    private readonly pipeline: readonly PipelineStage[],
+    private readonly options: AggregateOptions,
     private readonly paginate: boolean,
   ) {
     this.statistics = new Promise((resolve) => {
@@ -268,7 +242,7 @@ export class QueryImpl implements Query {
     const size = this.paginate ? Math.min(o.pageSize ?? DEFAULT_PAGE_SIZE, 10000) : undefined;
     let completed = false;
     try {
-      let spec = createSpec(this.db, this.coll, this.filter, this.pipeline, o, size);
+      let spec = aggregateSpec(this.db, this.coll, this.pipeline, o, size);
       for (;;) {
         const stream = (this.current = await this.runner.open(spec, o));
         if (this.cancelled) {

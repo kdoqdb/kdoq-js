@@ -36,16 +36,15 @@ export { expr, type Operand } from "./expr.js";
 export type { BulkStatement, Cursor, Stage, Target } from "./types.js";
 export type {
   Budget,
-  CountOptions,
   Diagnostic,
   Explain,
-  FindOptions,
+  AggregateOptions,
   Item,
   PipelineStage,
   Progress,
   Query,
   Statistics,
-  UnwindStep,
+  UnwindStage,
 } from "./query.js";
 export type { OpOptions } from "./types.js";
 export type { TransportFactory, TransportLike } from "./internal/connection.js";

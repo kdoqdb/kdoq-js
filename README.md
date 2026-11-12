@@ -15,14 +15,14 @@ const accounts = client.db().collection<{ name: string; age: number }>("accounts
 
 await accounts.put("u1", { name: "Ann", age: 31 });
 
-for await (const { key, value } of accounts.find("age >= 30")) {
+for await (const { key, value } of accounts.aggregate([{ match: "age >= 30" }])) {
   console.log(key, value.name);
 }
 ```
 
 - **Typed documents.** `collection<T>()` types what you read and write; values come back as plain
   JavaScript values, with classes for the types JavaScript lacks.
-- **Queries as async iterables.** `find` returns a lazy query. Pages are fetched as you read, and
+- **Queries as async iterables.** `aggregate` returns a lazy query. Pages are fetched as you read, and
   leaving the loop cancels the query and closes its cursor on the server.
 - **Mutations on the server.** Change documents with ordered stages instead of reading, modifying
   and writing back.
@@ -218,11 +218,11 @@ connection. `format(value)` prints any value as readable text.
 
 ## Queries
 
-`find` takes a filter and returns a query you iterate with `for await`. The query is lazy: it runs
+`aggregate` takes an ordered pipeline and returns a query you iterate with `for await`. The query is lazy: it runs
 on the first iteration, and it can be iterated once.
 
 ```ts
-for await (const { key, value } of accounts.find("age >= 30", undefined, { pageSize: 100 })) {
+for await (const { key, value } of accounts.aggregate([{ match: "age >= 30" }], { pageSize: 100 })) {
   console.log(key, value.name);
   if (enough()) break; // cancels the query and closes its cursor
 }
@@ -238,15 +238,22 @@ for await (const { key, value } of accounts.find("age >= 30", undefined, { pageS
 | `await query.statistics` | Execution statistics, when requested (see below). |
 | `await query.cancel()` | Stops the query from another place. |
 
-`await accounts.count("age >= 30")` counts matching documents; without a filter it counts them all.
+Count is a pipeline stage that returns one unkeyed numeric item, including zero for empty input:
+
+```ts
+const total = await accounts.aggregate<number>([{ match: "age >= 30" }, { count: true }]).first();
+console.log(total?.value);
+```
+
+Use an empty pipeline (`accounts.aggregate([])`) to read every document, or a `match` stage to filter documents.
 
 ### Options
 
-`find` and `count` take `pruning`, `budget` and the observers; `find` also takes `pageSize`,
-`idleTtl` and `window`.
+`aggregate` takes `pruning`, `budget`, observers, `pageSize`, `idleTtl` and `window`.
+The window applies to the final pipeline output.
 
 ```ts
-const query = accounts.find("age >= 30", undefined, {
+const query = accounts.aggregate([{ match: "age >= 30" }], {
   window: { skip: 20, limit: 10 },
   pruning: false, // Bloom pruning is on unless you turn it off
   budget: { memoryBytes: 64 << 20, activeMs: 2_000 },
@@ -257,25 +264,27 @@ const page = await query.toArray();
 console.log((await query.statistics)?.documents.selected);
 ```
 
-`find` also takes `explain: "plan" | "analyze"` (default `"off"`). An enabled mode yields exactly
-one item, the explanation report, instead of the documents; it works only with no pipeline or a
-single count stage, and not with `count`. `"plan"` shows the prepared plan without filtering
-documents, `"analyze"` also observes one real execution.
+`aggregate` also takes `explain: "plan" | "analyze"` (default `"off"`). An enabled mode yields exactly
+one item, the explanation report, instead of the result items. `"plan"` shows the prepared plan;
+`"analyze"` also observes one real execution. The current server accepts enabled explain only
+for an empty pipeline or a single count stage; other shapes, including match followed by count,
+are rejected.
 
 ```ts
-const [report] = await accounts.find("age >= 30", undefined, { explain: "plan" }).toArray();
+const [report] = await accounts.aggregate([{ count: true }], { explain: "plan" }).toArray();
 ```
 
-`find` and `count` also take `unwind`, a list of steps that turn the elements of arrays into documents
-before the filter runs (at most 8, nested in the order given). A step is `{ path, mode?, emit?, nonArray? }`:
-`mode` is `"all"` (every satisfying element, the default) or `"any"` (the first one per document);
-`emit` is `"element"` (the array is replaced by one element, the default) or `"source"` (the document
-is returned once, with `mode` defaulting to `"any"`); `nonArray` is `"skip"` (the default), `"error"` or
-`"single"` for a value that is not an array. Results are rows that keep the document key, and `count`
-counts rows. Results are not checked against `T`, so name the unwound shape as the type of `find`.
+An `unwind` stage replaces an array at `path` with each element, preserving the item key.
+It operates on the current item, so it may follow a projection or another unwind. Its optional
+`nonArray` policy is `"skip"` (default), `"error"` or `"single"` for missing, null or non-array values.
+Use a query-language `any` block in a `match` for document-existence checks.
+Name the resulting shape with the type parameter:
 
 ```ts
-const lines = orders.find<{ items: { sku: string; qty: number } }>("items.qty > 2", undefined, { unwind: [{ path: "items" }] });
+const lines = orders.aggregate<{ items: { sku: string; qty: number } }>([
+  { unwind: { path: "items" } },
+  { match: "items.qty > 2" },
+]);
 ```
 
 When statistics are requested, `page.statistics?.durationUs` on a manual cursor page
@@ -286,28 +295,28 @@ active execution time and requires server budgeting. Older servers may omit
 
 ### Aggregation
 
-A pipeline that changes the shape of the result goes in the second argument; the type parameter
-names the result.
+The pipeline is the first argument; the type parameter names the result.
 
 ```ts
 import { GroupKey } from "@kdoq/kdoq/value";
 
 const byCountry = [{ reduce: { key: "country", initial: "0", accumulate: "$prev + 1" } }];
-for await (const item of accounts.find<number>(undefined, byCountry)) {
+for await (const item of accounts.aggregate<number>(byCountry)) {
   console.log(item.key instanceof GroupKey ? item.key.value : item.key, item.value); // the grouping key and the count
 }
 ```
 
-The stages are `project`, `match`, `reduce` and `count`.
+The stages are `project`, `match`, `reduce`, `count` and `unwind`. Stages may repeat in any order.
+A reduction accepts `onError: "abort"` (default) or `"skipGroup"` to drop failing groups with diagnostics.
 
 ### Cursors
 
-A cursor is advanced by hand, for example behind a "load more" button. `find` with
+A cursor is advanced by hand, for example behind a "load more" button. `aggregate` with
 `paginate: "manual"` resolves to one, and `client.attachCursor(id)` continues a cursor from another
 connection of the same identity, so a stateless service can page across requests.
 
 ```ts
-const cursor = await accounts.find("age >= 30", undefined, { paginate: "manual", pageSize: 50 });
+const cursor = await accounts.aggregate([{ match: "age >= 30" }], { paginate: "manual", pageSize: 50 });
 try {
   for (;;) {
     const page = await cursor.next();

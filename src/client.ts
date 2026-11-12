@@ -11,7 +11,6 @@ import type {
   ClientState,
   Collection,
   CollectionInfo,
-  CountOptions,
   Database,
   DatabaseInfo,
   Databases,
@@ -25,13 +24,13 @@ import type {
   SessionInfo,
   Sessions,
   WriteOptions,
-  FindOptions,
+  AggregateOptions,
   OpOptions,
   BulkStatement,
   Stage,
   Target,
 } from "./types.js";
-import { Cursor, createSpec, encodeUnwind, QueryImpl, parseStatistics, type PaginateMode } from "./query.js";
+import { Cursor, aggregateSpec, QueryImpl, parseStatistics, type PaginateMode } from "./query.js";
 import { RUNNER, type Runner, type Unary } from "./internal/runner.js";
 import { KeyBytes, NameDictionary, type Doc } from "./internal/codec.js";
 import { concat, enc, type Fields, utf8 } from "./internal/wire.js";
@@ -486,40 +485,22 @@ class CollectionImpl implements Collection {
     }
   }
 
-  find(filter?: string, pipeline?: PipelineStage[], options: FindOptions & { paginate?: PaginateMode } = {}): Query & Promise<Cursor> {
+  aggregate(pipeline: readonly PipelineStage[], options: AggregateOptions & { paginate?: PaginateMode } = {}): Query & Promise<Cursor> {
     const { paginate = true, ...rest } = options;
     if (paginate === "manual") {
-      return this.manualCursor(filter, pipeline, rest) as unknown as Query & Promise<Cursor>;
+      return this.manualCursor(pipeline, rest) as unknown as Query & Promise<Cursor>;
     }
-    return new QueryImpl(this.runner, this.database, this.name, filter, pipeline, rest, paginate) as unknown as Query & Promise<Cursor>;
+    return new QueryImpl(this.runner, this.database, this.name, pipeline, rest, paginate) as unknown as Query & Promise<Cursor>;
   }
 
-  private async manualCursor(filter: string | undefined, pipeline: PipelineStage[] | undefined, o: FindOptions): Promise<Cursor> {
-    const stream = await this.runner.open(createSpec(this.database, this.name, filter, pipeline, o, 0), o);
+  private async manualCursor(pipeline: readonly PipelineStage[], o: AggregateOptions): Promise<Cursor> {
+    const stream = await this.runner.open(aggregateSpec(this.database, this.name, pipeline, o, 0), o);
     const id = stream.begin?.u64(1);
     for (;;) {
       if (!(await stream.next())) break;
     }
     if (!id) throw new KdoqError("the server returned no cursor", { code: ErrorCode.Malformed });
     return new Cursor(this.runner, id, o.pageSize);
-  }
-
-  async count(filter?: string, options: CountOptions = {}): Promise<number | bigint> {
-    const o = options;
-    const observe = enc.group(
-      3,
-      enc.bool(1, o.observe?.progress ?? !!o.onProgress),
-      enc.bool(2, o.observe?.diagnostics ?? !!o.onDiagnostic),
-      enc.bool(3, o.observe?.statistics ?? false),
-    );
-    const payload = concat(
-      this.ns,
-      ...(filter === undefined ? [] : [enc.str(3, filter)]),
-      enc.group(4, observe, ...(o.pruning === undefined ? [] : [enc.bool(5, o.pruning)])),
-      ...encodeUnwind(o.unwind),
-    );
-    const r = await this.runner.unary({ operation: 0x0502, payload }, o);
-    return r.items[0].need(r.items[0].u64(1), 1);
   }
 
   get info(): Promise<CollectionInfo> {

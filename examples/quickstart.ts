@@ -12,7 +12,7 @@ const accounts = client.db().collection<Account>("accounts");
 
 await accounts.put("u1", { name: "Ann", age: 31 });
 
-for await (const { key, value } of accounts.find("age >= 30")) {
+for await (const { key, value } of accounts.aggregate([{ match: "age >= 30" }])) {
   console.log(key, value.name);
 }
 
