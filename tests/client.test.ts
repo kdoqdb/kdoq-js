@@ -52,7 +52,7 @@ describe("connecting", () => {
     await client.closed;
   });
 
-  test("the default port is 27505", async () => {
+  test("the default WebTransport port is 443", async () => {
     const server = new FakeServer();
     const urls: string[] = [];
     const client = await open(server, "kdoq://localhost/app", {
@@ -61,8 +61,32 @@ describe("connecting", () => {
         return server.factory(url, init);
       },
     });
-    expect(urls).toEqual(["https://localhost:27505/native"]);
+    expect(urls).toEqual(["https://localhost:443/native"]);
     await client.close();
+  });
+
+  test("both supported schemes use WebTransport and preserve explicit ports", async () => {
+    for (const [dsn, port] of [
+      ["kdoq+wt://localhost/app", 443],
+      ["kdoq+wt://localhost:27505/app", 27505],
+      ["kdoq://localhost:27505/app", 27505],
+    ] as const) {
+      const server = new FakeServer();
+      const urls: string[] = [];
+      const client = await open(server, dsn, {
+        transport: (url: string, init: never) => {
+          urls.push(url);
+          return server.factory(url, init);
+        },
+      });
+      expect(urls).toEqual([`https://localhost:${port}/native`]);
+      await client.close();
+    }
+    for (const scheme of ["quic", "h2"]) {
+      const server = new FakeServer();
+      await expect(open(server, `kdoq+${scheme}://localhost`)).rejects.toBeInstanceOf(KdoqConfigError);
+      expect(server.transports).toHaveLength(0);
+    }
   });
 
   test("await using closes the client", async () => {

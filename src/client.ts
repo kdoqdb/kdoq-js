@@ -71,8 +71,8 @@ export interface ConnectOptions {
 
 const STATES: Record<number, ResourceState> = { 1: "loaded", 2: "unavailable", 3: "unloaded", 4: "loading", 5: "unloading" };
 
-/** The port a kdoq server listens on unless configured otherwise. */
-export const DEFAULT_PORT = 27505;
+/** The default WebTransport endpoint port; an explicit DSN or option port overrides it. */
+export const DEFAULT_PORT = 443;
 
 const DEFAULT_BACKOFF = { initial: 100, max: 5000, factor: 2, jitter: true };
 
