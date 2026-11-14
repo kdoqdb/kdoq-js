@@ -32,6 +32,9 @@ async function scenario(c: Config, transport?: TransportFactory) {
   const client: Client = await connect(dsn, { certificateHash: c.hash, transport });
   check(client.state === "connected" && client.session?.accessLevel === 3, "connect with SCRAM and READY");
   check(await client.server.health(), "server health");
+  const explicit = await connect(dsn.replace("kdoq://", "kdoq+wt://"), { certificateHash: c.hash, transport });
+  check(await explicit.server.health(), "explicit WebTransport scheme with shared trust");
+  await explicit.close();
   const caps = await client.server.capabilities();
   check(caps.operations.includes(0x0407) && caps.encoding === 4, "server capabilities");
 

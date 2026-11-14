@@ -105,7 +105,7 @@ kdoq://[user[:password]@]host[:port][/database]
 | --- | --- |
 | `user` | Selects SCRAM-SHA-256 authentication. Without a user the session is anonymous. |
 | `password` | The user's password. Prefer the `password` option so it stays out of the string. |
-| `port` | The server's port. When omitted the client uses 27505. |
+| `port` | The server's port. When omitted the client uses 443 (WebTransport). |
 | `database` | The default database for `client.db()`. |
 
 Options override any part of the connection string (`host`, `port`, `username`, `password`,
@@ -459,3 +459,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 [MIT](LICENSE)
+
+
+### Connection schemes and migration
+
+Both `kdoq://` and `kdoq+wt://` select WebTransport in every supported runtime.
+`kdoq+quic://` and `kdoq+h2://` are rejected before network access. The `transport`
+factory remains available with either supported scheme; it supplies a WebTransport
+implementation, including in Node and Bun.
+
+The default client port is now **443**, including when a factory is supplied.
+An explicit DSN or options port takes precedence. Existing servers on 27505 need
+`kdoq://host:27505`; there is no retry on the old port. This client default does
+not change server listener configuration. The database path is unchanged and the
+WebTransport request still targets `/native`.

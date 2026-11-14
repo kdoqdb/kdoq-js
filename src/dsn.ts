@@ -8,7 +8,7 @@ export interface ParsedDsn {
   database?: string;
 }
 
-const DSN = /^kdoq:\/\/(?:([^:@/?#]*)(?::([^@/?#]*))?@)?(\[[^\]]+\]|[^:/?#@]+)(?::(\d+))?(?:\/([^?#]*))?$/;
+const DSN = /^kdoq(?:\+wt)?:\/\/(?:([^:@/?#]*)(?::([^@/?#]*))?@)?(\[[^\]]+\]|[^:/?#@]+)(?::(\d+))?(?:\/([^?#]*))?$/;
 
 const decode = (s: string | undefined, what: string): string | undefined => {
   if (!s) return undefined;
@@ -19,10 +19,10 @@ const decode = (s: string | undefined, what: string): string | undefined => {
   }
 };
 
-/** Parses `kdoq://[username[:password]@]<host>[:port][/database]`. */
+/** Parses `kdoq[+wt]://[username[:password]@]<host>[:port][/database]`. */
 export function parseDsn(dsn: string): ParsedDsn {
   const m = DSN.exec(dsn);
-  if (!m) throw new KdoqConfigError("invalid DSN: expected kdoq://[username[:password]@]<host>[:port][/database]");
+  if (!m) throw new KdoqConfigError("invalid or unsupported DSN: expected kdoq[+wt]://[username[:password]@]<host>[:port][/database]");
   const port = m[4] === undefined ? undefined : Number(m[4]);
   if (port !== undefined && !(port >= 1 && port <= 65535)) throw new KdoqConfigError("invalid DSN port");
   return {
