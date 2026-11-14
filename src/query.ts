@@ -197,6 +197,7 @@ export class QueryImpl implements Query {
   private resolveStats!: (s: Statistics | undefined) => void;
   private started = false;
   private cancelled = false;
+  private cancellation = new AbortController();
   private current?: OperationStream;
 
   constructor(
@@ -214,6 +215,7 @@ export class QueryImpl implements Query {
 
   async cancel(): Promise<void> {
     this.cancelled = true;
+    this.cancellation.abort(new DOMException("Query cancelled", "AbortError"));
     await this.current?.cancel();
   }
 
@@ -239,7 +241,10 @@ export class QueryImpl implements Query {
   }
 
   private async *run(): AsyncGenerator<Item> {
-    const o = this.options;
+    const o = {
+      ...this.options,
+      signal: this.options.signal ? AbortSignal.any([this.options.signal, this.cancellation.signal]) : this.cancellation.signal,
+    };
     const size = this.paginate ? Math.min(o.pageSize ?? DEFAULT_PAGE_SIZE, 10000) : undefined;
     let completed = false;
     try {

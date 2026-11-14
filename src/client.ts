@@ -263,7 +263,9 @@ class ClientImpl implements Client, Runner {
   async open(spec: OpSpec, options: OpOptions = {}): Promise<OperationStream> {
     const limit = deadline(options.signal, options.timeout ?? this.o.timeout ?? 30000, spec.write ?? false);
     try {
-      return await this.openWithin(spec, limit.signal, limit.stop);
+      const stream = await this.openWithin(spec, limit.signal, limit.stop);
+      if (options.signal) stream.follow(options.signal);
+      return stream;
     } finally {
       limit.dispose();
     }

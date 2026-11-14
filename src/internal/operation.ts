@@ -52,6 +52,7 @@ export class OperationStream {
   private readonly reader: FrameReader;
   private readonly contexts = new Map<number, Map<number, string>>();
   private finished = false;
+  private abortListeners = new Map<AbortSignal, () => void>();
   private aborted: unknown;
   /** The BEGIN fields, once received. */
   begin?: Fields;
@@ -142,15 +143,27 @@ export class OperationStream {
         writer.releaseLock?.();
       }
     })();
-    if (signal) {
-      const onAbort = () => {
-        op.aborted = signal.reason ?? new DOMException("Aborted", "AbortError");
-        void op.cancel();
-      };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
+    if (signal) op.follow(signal);
     return op;
+  }
+
+  /** Keeps caller cancellation connected for the complete response lifetime. */
+  follow(signal: AbortSignal): void {
+    if (this.finished || this.abortListeners.has(signal)) return;
+    const onAbort = () => {
+      this.aborted = signal.reason ?? new DOMException("Aborted", "AbortError");
+      void this.cancel();
+    };
+    if (signal.aborted) onAbort();
+    else {
+      this.abortListeners.set(signal, onAbort);
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
+
+  private clearAbortListeners(): void {
+    for (const [signal, listener] of this.abortListeners) signal.removeEventListener("abort", listener);
+    this.abortListeners.clear();
   }
 
   get done(): boolean {
@@ -187,6 +200,7 @@ export class OperationStream {
         f = await this.reader.read();
       } catch (e) {
         this.finished = true;
+        this.clearAbortListeners();
         this.report(this.aborted !== undefined ? "cancelled" : "error");
         throw this.aborted !== undefined ? this.aborted : this.lost(e);
       }
@@ -198,6 +212,7 @@ export class OperationStream {
       if (!f) {
         this.log("stream ended without END or ERROR");
         this.finished = true;
+        this.clearAbortListeners();
         this.report("error");
         throw new KdoqIncompleteError("the stream ended without END or ERROR", {
           outcome: this.write ? "Unknown" : "NotApplied",
@@ -262,6 +277,7 @@ export class OperationStream {
 
   private finish(): void {
     this.finished = true;
+    this.clearAbortListeners();
     void this.reader.cancel();
   }
 
@@ -282,8 +298,8 @@ export class OperationStream {
     if (this.finished) return;
     this.log("cancelled by the client");
     this.finished = true;
+    this.clearAbortListeners();
     this.report("cancelled");
-    await this.reader.cancel();
-    if (this.host.alive) await this.host.cancel(this.requestId).catch(() => {});
+    await Promise.all([this.reader.cancel(), this.host.alive ? this.host.cancel(this.requestId).catch(() => {}) : Promise.resolve()]);
   }
 }
