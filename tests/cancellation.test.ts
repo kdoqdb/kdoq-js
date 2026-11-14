@@ -74,3 +74,48 @@ test("protocol CANCEL does not wait for read cancellation to settle", async () =
   await pending;
   expect(sent).toEqual([42]);
 });
+
+test("dashboard aggregatePage abort logs cancellation and closes its cursor", async () => {
+  const { frame, enc } = await import("../src/internal/wire");
+  const server = new FakeServer();
+  server.handler = (command) =>
+    command.operation === 0x0504
+      ? [encodeFrame(Kind.BEGIN), encodeFrame(Kind.END)]
+      : [frame(Kind.BEGIN, enc.u64(1, 123)), frame(Kind.PROGRESS, enc.u64(1, 1), enc.u64(2, 64)), encodeFrame(Kind.END)];
+  const logs: string[] = [];
+  const client = await connect("kdoq://localhost/app", { transport: server.factory, trace: (line) => logs.push(line) });
+  const controller = new AbortController();
+  const reason = new Error("Stop query button");
+  await expect(
+    client
+      .db()
+      .collection("items")
+      .aggregatePage([{ match: "product.value = 'some'" }], {
+        signal: controller.signal,
+        onProgress: () => controller.abort(reason),
+      }),
+  ).rejects.toBe(reason);
+  expect(logs.some((line) => line.includes("cancelled by the client"))).toBe(true);
+  expect(server.commands.some((command) => command.operation === 0x0504)).toBe(true);
+  await client.close();
+});
+
+test("aggregatePage abort before BEGIN logs cancellation", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Stop before BEGIN");
+  const server = new FakeServer();
+  server.handler = () => {
+    controller.abort(reason);
+    return "hang";
+  };
+  const logs: string[] = [];
+  const client = await connect("kdoq://localhost/app", { transport: server.factory, trace: (line) => logs.push(line) });
+  await expect(
+    client
+      .db()
+      .collection("items")
+      .aggregatePage([{ match: "product.value = 'some'" }], { signal: controller.signal }),
+  ).rejects.toBe(reason);
+  expect(logs.some((line) => line.includes("cancelled by the client"))).toBe(true);
+  await client.close();
+});
